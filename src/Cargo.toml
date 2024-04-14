@@ -1,0 +1,40 @@
+[package]
+name = "acars-hub"
+version = "4.0.0-alpha1"
+edition = "2021"
+authors = ["Fred Clausen"]
+description = "ACARS Hub is a consumer of ACARS messages from many sources, matching them up with ADSB and other data, and then displaying them in a web interface."
+documentation = "https://github.com/sdr-enthusiasts/docker-acarshub/README.md"
+homepage = "https://github.com/sdr-enthusiasts/docker-acarshub"
+repository = "https://github.com/sdr-enthusiasts/docker-acarshub"
+readme = "README.MD"
+license = "GPL-3.0"
+rust-version = "1.77.2"
+keywords = [
+    "acars",
+    "vdlm",
+    "vdlm2",
+    "vdl-m2",
+    "hfdl",
+    "adsb",
+    "docker",
+    "web",
+    "sdr",
+    "rtl-sdr",
+    "aircraft",
+    "airplane",
+    "airline",
+    "flight",
+    "tracking",
+    "hub",
+    "server",
+    "client",
+    "frontend",
+    "backend",
+    "api",
+]
+categories = ["aerospace"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
