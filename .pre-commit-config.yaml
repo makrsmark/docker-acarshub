@@ -68,7 +68,9 @@ repos:
     hooks:
       - id: codespell
         types: [text]
+        args: [--ignore-words=.dictionary.txt]
         exclude: ^(rootfs/webapp/|acarshub-typescript/node_modules/|acarshub-typescript/package.json|acarshub-typescript/package-lock.json)
+
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.10.0.1
     hooks:

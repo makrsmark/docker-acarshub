@@ -1,4 +1,9 @@
-[package]
+[workspace]
+members = ["src/libraries/ah_config", "src/bin/acars_hub"]
+
+resolver = "2"
+
+[workspace.package]
 name = "acars-hub"
 version = "4.0.0-alpha1"
 edition = "2021"
@@ -36,5 +41,3 @@ keywords = [
 categories = ["aerospace"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]

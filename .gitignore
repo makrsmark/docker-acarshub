@@ -141,3 +141,5 @@ rootfs/webapp/include
 rootfs/webapp/__pycache__
 rootfs/webapp/pyvenv.cfg
 src/target
+target/
+ah_config.toml
