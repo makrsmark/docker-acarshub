@@ -43,3 +43,4 @@ rootfs/webapp/pyvenv.cfg
 src/target
 target/
 ah_config.toml
+ah_config.yaml

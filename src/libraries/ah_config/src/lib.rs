@@ -18,9 +18,12 @@
 //  * Default values (least priority)
 //  * Configuration file (toml format)
 //  * Environment variables
-//  * Command line arguments (highest priority) TODO: Implement command line arguments. The config crate doesn't do this out of the box
+//  * Command line arguments (highest priority)
+// TODO: Implement command line arguments. The config crate doesn't do this out of the box
 //  If no config file is provided whatever value is picked will be written to the default config file
 //  If a config file is provided, and a higher priority value is provided via environment variable or command line argument, the value will be written to the config file
+
+use std::{fmt, marker::PhantomData, str::FromStr};
 
 /// ACARS Hub valid configuration options
 /// database_url: The URL to the database
@@ -31,37 +34,234 @@
 /// enable_inmarsat: Enable Inmarsat processing
 /// enable_adsb: Enable ADS-B processing
 /// log_level: The log level. Valid values are: trace, debug, info, warn, error. Default is info. List is ordered from most verbose to least verbos
-use config::Config;
-use log::info;
+use figment::{
+    providers::{Env, Format, Toml},
+    Figment,
+};
+use log::debug;
 use sdre_rust_logging::SetupLogging;
-use std::collections::HashMap;
+use serde::{
+    de::{self, MapAccess, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
+use serde_inline_default::serde_inline_default;
+use void::Void;
 
-pub struct AhConfig {
+// FIXME: env variables require a dot between the prefix and the variable name. This is not ideal. Should be able to use underscores
+
+#[serde_inline_default]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AcarsHub {
+    #[serde_inline_default("sqlite://acars.db".to_string())]
     pub database_url: String,
-    pub enable_acars: bool,
-    pub enable_vdlm2: bool,
-    pub enable_hfdl: bool,
-    pub enable_iridium: bool,
-    pub enable_inmarsat: bool,
-    pub enable_adsb: bool,
+    #[serde_inline_default("info".to_string())]
     pub log_level: String,
+    #[serde_inline_default("./data".to_string())]
+    pub data_path: String,
+    #[serde_inline_default(AhConfig::get_file_path())]
     pub config_file: String,
 }
 
-impl Default for AhConfig {
+impl Default for AcarsHub {
     fn default() -> Self {
-        AhConfig {
+        AcarsHub {
             database_url: "sqlite://acars.db".to_string(),
-            enable_acars: false,
-            enable_vdlm2: false,
-            enable_hfdl: false,
-            enable_iridium: false,
-            enable_inmarsat: false,
-            enable_adsb: false,
             log_level: "info".to_string(),
+            data_path: "./data".to_string(),
             config_file: AhConfig::get_file_path(),
         }
     }
+}
+
+trait SourceTrait {
+    fn new() -> Self;
+    fn insert(&mut self, value: Address);
+}
+
+#[serde_inline_default]
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct EnabledDataSources {
+    #[serde_inline_default(false)]
+    pub acars: bool,
+    #[serde_inline_default(false)]
+    pub vdlm2: bool,
+    #[serde_inline_default(false)]
+    pub hfdl: bool,
+    #[serde_inline_default(false)]
+    pub iridium: bool,
+    #[serde_inline_default(false)]
+    pub inmarsat: bool,
+    #[serde_inline_default(false)]
+    pub adsb: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Address {
+    address: String,
+    port: u16,
+}
+
+impl Address {
+    pub fn new(input: String) -> Option<Self> {
+        let parts: Vec<&str> = input.split(':').collect();
+
+        if parts.len() != 2 {
+            return None;
+        }
+
+        let port = match parts[1].parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                return None;
+            }
+        };
+
+        Some(Address {
+            address: parts[0].trim().to_string(),
+            port,
+        })
+    }
+}
+
+impl Serialize for Address {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        format!("{}:{}", self.address, self.port).serialize(serializer)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct Source {
+    addresses: Vec<Address>,
+}
+
+impl FromStr for Source {
+    type Err = Void;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut output = Source::new();
+
+        for address in s.split(',') {
+            if let Some(address) = Address::new(address.to_string()) {
+                output.insert(address);
+            }
+        }
+
+        Ok(output)
+    }
+}
+
+impl SourceTrait for Source {
+    fn new() -> Self {
+        Source {
+            addresses: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, value: Address) {
+        self.addresses.push(value);
+    }
+}
+
+#[serde_inline_default]
+#[derive(Debug, Serialize, Default, Deserialize)]
+pub struct DataSources {
+    #[serde_inline_default(Source::default())]
+    #[serde(deserialize_with = "string_or_struct")]
+    pub acars_routers: Source,
+    #[serde_inline_default(Source::default())]
+    #[serde(deserialize_with = "string_or_struct")]
+    pub adsb_sources: Source,
+}
+
+fn string_or_struct<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Deserialize<'de> + FromStr<Err = Void> + SourceTrait,
+    D: Deserializer<'de>,
+{
+    // This is a Visitor that forwards string types to T's `FromStr` impl and
+    // forwards map types to T's `Deserialize` impl. The `PhantomData` is to
+    // keep the compiler from complaining about T being an unused generic type
+    // parameter. We need T in order to know the Value type for the Visitor
+    // impl.
+    struct StringOrStruct<T>(PhantomData<fn() -> T>);
+
+    impl<'de, T> Visitor<'de> for StringOrStruct<T>
+    where
+        T: Deserialize<'de> + FromStr<Err = Void> + SourceTrait,
+    {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("string or map")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<T, E>
+        where
+            E: de::Error,
+        {
+            Ok(FromStr::from_str(value).unwrap())
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<T, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            // `MapAccessDeserializer` is a wrapper that turns a `MapAccess`
+            // into a `Deserializer`, allowing it to be used as the input to T's
+            // `Deserialize` implementation. T then deserializes itself using
+            // the entries from the map visitor.
+            Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            // is the seq a string?
+
+            let length = seq.size_hint().unwrap_or(0);
+
+            if length == 0 {
+                return Ok(T::new());
+            }
+
+            let mut source = T::new();
+
+            while let Some(value) = seq.next_element::<String>()? {
+                if let Some(address) = Address::new(value) {
+                    source.insert(address);
+                }
+            }
+
+            Ok(source)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrStruct(PhantomData))
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct MapConfig {
+    center_latitude: f64,
+    center_longitude: f64,
+}
+
+
+#[serde_inline_default]
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct AhConfig {
+    #[serde_inline_default(AcarsHub::default())]
+    pub app: AcarsHub,
+    #[serde_inline_default(EnabledDataSources::default())]
+    pub enabled_data_sources: EnabledDataSources,
+    #[serde_inline_default(DataSources::default())]
+    pub data_sources: DataSources,
+    #[serde_inline_default(MapConfig::default())]
+    pub map: MapConfig,
+
 }
 
 impl AhConfig {
@@ -90,124 +290,57 @@ impl AhConfig {
         }
     }
 
-    fn write_default_config(file_path: &str) {
-        // Lets see if the file exists
-        if !std::path::Path::new(&file_path).exists() {
-            // if the file does not exist, we will write the default config to the file
-            let default_config = r#"
-                        database_url = "sqlite://acars.db"
-                        enable_acars = false
-                        enable_vdlm2 = false
-                        enable_hfdl = false
-                        enable_iridium = false
-                        enable_inmarsat = false
-                        enable_adsb = false
-                        log_level = "info"
-                    "#;
-
-            std::fs::write(file_path, default_config).unwrap();
-
-            println!(
-                "Config file does not exist, creating it now at {}",
-                std::fs::canonicalize(file_path)
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .to_string()
-            );
+    fn get_config(file_path: &str) -> AhConfig {
+        match Figment::new()
+            .merge(Toml::file(file_path))
+            .merge(Env::prefixed("AH_"))
+            .extract()
+        {
+            Ok(config) => config,
+            Err(e) => {
+                println!("Error reading config file: {}", e);
+                println!("Exiting");
+                std::process::exit(1);
+            }
         }
-    }
-
-    fn get_config(file_path: &str) -> Option<HashMap<String, String>> {
-        // if we are in a test env (denoted with AH_TEST_ENV_PATH) we will use the test config file
-        // from the env variable. Otherwise, detect the platform and use "./ah_config.toml" for the config file
-
-        AhConfig::write_default_config(file_path);
-
-        let config = Config::builder()
-            .add_source(config::File::with_name(file_path))
-            .add_source(config::Environment::with_prefix("AH"))
-            .build()
-            .unwrap();
-
-        config.try_deserialize().unwrap()
     }
 
     fn get_and_validate_config() -> AhConfig {
         let file_path = AhConfig::get_file_path();
-        let config = AhConfig::get_config(&file_path).unwrap();
-
-        let mut ah_config = AhConfig::default();
-
-        if let Some(database_url) = config.get("database_url") {
-            ah_config.database_url = database_url.to_string();
-        }
-
-        if let Some(enable_acars) = config.get("enable_acars") {
-            ah_config.enable_acars = enable_acars.parse().unwrap();
-        }
-
-        if let Some(enable_vdlm2) = config.get("enable_vdlm2") {
-            ah_config.enable_vdlm2 = enable_vdlm2.parse().unwrap();
-        }
-
-        if let Some(enable_hfdl) = config.get("enable_hfdl") {
-            ah_config.enable_hfdl = enable_hfdl.parse().unwrap();
-        }
-
-        if let Some(enable_iridium) = config.get("enable_iridium") {
-            ah_config.enable_iridium = enable_iridium.parse().unwrap();
-        }
-
-        if let Some(enable_inmarsat) = config.get("enable_inmarsat") {
-            ah_config.enable_inmarsat = enable_inmarsat.parse().unwrap();
-        }
-
-        if let Some(enable_adsb) = config.get("enable_adsb") {
-            ah_config.enable_adsb = enable_adsb.parse().unwrap();
-        }
-
-        if let Some(log_level) = config.get("log_level") {
-            ah_config.log_level = log_level.to_string();
-        }
-
-        ah_config
+        AhConfig::get_config(&file_path)
     }
 
     pub fn show_config(&self) {
-        info!("database_url: {}", self.database_url);
-        info!("enable_acars: {}", self.enable_acars);
-        info!("enable_vdlm2: {}", self.enable_vdlm2);
-        info!("enable_hfdl: {}", self.enable_hfdl);
-        info!("enable_iridium: {}", self.enable_iridium);
-        info!("enable_inmarsat: {}", self.enable_inmarsat);
-        info!("enable_adsb: {}", self.enable_adsb);
-        info!("log_level: {}", self.log_level);
+        debug!("Config: {:#?}", self);
     }
 
     pub fn enable_logging(&self) {
-        self.log_level.enable_logging();
+        self.app.log_level.enable_logging();
     }
 
-    pub fn get_config_as_toml_string(&self) -> String {
-        let mut config = String::new();
+    pub fn stringify_array_for_config_file(array: &[String]) -> String {
+        array
+            .iter()
+            .map(|s| format!("\"{}\"", s))
+            .collect::<Vec<String>>()
+            .join(", ")
+    }
 
-        config.push_str(&format!("database_url = \"{}\"\n", self.database_url));
-        config.push_str(&format!("enable_acars = {}\n", self.enable_acars));
-        config.push_str(&format!("enable_vdlm2 = {}\n", self.enable_vdlm2));
-        config.push_str(&format!("enable_hfdl = {}\n", self.enable_hfdl));
-        config.push_str(&format!("enable_iridium = {}\n", self.enable_iridium));
-        config.push_str(&format!("enable_inmarsat = {}\n", self.enable_inmarsat));
-        config.push_str(&format!("enable_adsb = {}\n", self.enable_adsb));
-        config.push_str(&format!("log_level = \"{}\"\n", self.log_level));
-
-        config
+    pub fn get_config_as_yaml_string(&self) -> String {
+        toml::to_string(&self).unwrap()
     }
 
     pub fn write_config(&self) {
         let file_path = AhConfig::get_file_path();
-        let config = self.get_config_as_toml_string();
+        let config = self.get_config_as_yaml_string();
 
-        std::fs::write(file_path, config).unwrap();
+        match std::fs::write(file_path, config) {
+            Ok(_) => (),
+            Err(e) => {
+                println!("Error writing config file: {}", e);
+                println!("Exiting");
+                std::process::exit(1);
+            }
+        }
     }
 }
